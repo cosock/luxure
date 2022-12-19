@@ -246,17 +246,24 @@ function Server:_run(err_callback, should_continue)
   while should_continue() do self:tick(err_callback) end
 end
 
+function Server:spawn(err_callback, should_continue)
+  err_callback = err_callback or function() end
+  should_continue = should_continue or function() return true end
+  if not self._sync then
+    cosock.spawn(function() self:_run(err_callback, should_continue) end,
+      "luxure-main-loop")
+  else
+    self:_run(err_callback, should_continue)
+  end
+end
+
 ---Start this server, blocking forever
 ---@param err_callback fun(msg:string):boolean Optional callback to be run if `tick` returns an error
 function Server:run(err_callback, should_continue)
   log.trace("Server:run")
-  err_callback = err_callback or function() return true end
+  self:spawn(err_callback, should_continue)
   if not self._sync then
-    cosock.spawn(function() self:_run(err_callback, should_continue) end,
-                 "luxure-main-loop")
     cosock.run()
-  else
-    self:_run(err_callback, should_continue)
   end
 end
 
