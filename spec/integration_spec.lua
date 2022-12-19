@@ -1,8 +1,10 @@
+
 local lux = require 'luxure'
 local cosock = require 'cosock'
 local Request = require 'luncheon.request'
 local Response = require 'luncheon.response'
 local log = require 'log'
+local test_utils = require 'spec.test_utils'
 
 function get_socket(ip, port)
   local sock = assert(cosock.socket.tcp())
@@ -44,7 +46,7 @@ local tests = {
 }
 
 describe('Integration Test', function()
-  it('works #integration', function()
+  it('works #integration',test_utils.wrap(function()
     local server = assert(lux.Server.new(lux.Opts.new():set_env('debug')))
     server:listen()
     server:get('/', function(req, res)
@@ -76,9 +78,10 @@ describe('Integration Test', function()
         f(ip, port)
         log.info('completed', name)
       end
-    end,'client loop')
-    server:run(error, function()
+        end, 'client loop')
+    
+    server:spawn(error, function()
       return ct < total_tests
     end)
-  end)
+  end))
 end)
