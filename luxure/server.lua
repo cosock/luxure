@@ -16,7 +16,7 @@ local log = require "log"
 ---
 ---@field private sock table socket being used by the server
 ---@field public router Router The router for incoming requests
----@field private middleware table List of middleware callbacks
+---@field private middleware fun(req: Request, res: Response) Chain of middleware callbacks
 ---@field public ip string defaults to '0.0.0.0'
 ---@field private env string defaults to 'production'
 ---@field private backlog number|nil defaults to nil
@@ -92,7 +92,6 @@ function Server.new_with(sock, opts)
     env = opts.env or "production",
     ---@type number
     backlog = opts.backlog,
-    _sync = opts.sync,
   }
   return setmetatable(base, Server)
 end
@@ -126,7 +125,6 @@ end
 function Server:use(middleware)
   log.trace("Server:use")
   if self.middleware == nil then
-    ---@type fun(req:Request,res:Response)
     self.middleware = function(req, res)
       self.router.route(self.router, req, res)
     end
@@ -222,23 +220,14 @@ function Server:tick(err_callback)
     err_callback(err)
     return
   end
-  if not self._sync then
-    cosock.spawn(function()
-      local nopanic, success, err = pcall(self._tick, self, incoming)
-      if not nopanic then
-        err_callback(success)
-        return
-      end
-      if not success then err_callback(err) end
-    end, string.format("Accepted request (ptr: %s)", incoming))
-  else
+  cosock.spawn(function()
     local nopanic, success, err = pcall(self._tick, self, incoming)
     if not nopanic then
       err_callback(success)
       return
     end
     if not success then err_callback(err) end
-  end
+  end, string.format("Accepted request (ptr: %s)", incoming))
 end
 
 function Server:_run(err_callback, should_continue)
@@ -250,12 +239,8 @@ end
 function Server:spawn(err_callback, should_continue)
   err_callback = err_callback or function() end
   should_continue = should_continue or function() return true end
-  if not self._sync then
-    cosock.spawn(function() self:_run(err_callback, should_continue) end,
-      "luxure-main-loop")
-  else
-    self:_run(err_callback, should_continue)
-  end
+  cosock.spawn(function() self:_run(err_callback, should_continue) end,
+    "luxure-main-loop")
 end
 
 ---Start this server, blocking forever
@@ -263,9 +248,7 @@ end
 function Server:run(err_callback, should_continue)
   log.trace("Server:run")
   self:spawn(err_callback, should_continue)
-  if not self._sync then
-    cosock.run()
-  end
+  cosock.run()
 end
 
 for _, method in ipairs(methods) do
@@ -277,4 +260,4 @@ for _, method in ipairs(methods) do
   end
 end
 
-return {Server = Server, Opts = Opts}
+return { Server = Server, Opts = Opts }
