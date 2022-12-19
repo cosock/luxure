@@ -162,17 +162,18 @@ local function debug_error_body(err)
   local code = err.status or "500"
   local h2 = err.msg_with_line or "Unknown Error"
   local pre = err.traceback or ""
-  return string.format([[<!DOCTYPE html>
-<html>
-    <head>
-    </head>
-    <body>
-        <h1>Error processing request: <code> %s </code></h1>
-        <h2>%s</h2>
-        <pre>%s</pre>
-    </body>
-</html>
-    ]], code, h2, pre)
+  return string.format(table.concat({
+    '<!DOCTYPE html>',
+    '<html>',
+    '  <head>',
+    '  </head>',
+    '  <body>',
+    '    <h1>Error processing request: <code> %s </code></h1>',
+    '    <h2>%s</h2>',
+    '    <pre>%s</pre>',
+    '  </body>',
+    '</html>',
+  }, '\n'), code, h2, pre)
 end
 
 local function error_request(env, err, res)
