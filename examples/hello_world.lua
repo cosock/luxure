@@ -31,16 +31,16 @@ server:use(function (req, res, next)
     next(req, res)
     local request = string.format('%s %s %s', req.method, req.url.path, req.http_version)
     local _, sent, _ = req.socket:getstats()
-    print(
+  print(
         string.format('%s - %s - [%s] "%s" %i %i "%s" "%s"',
             remote,
             req.url.user or '',
             os.date('%Y-%m-%dT%H:%M:%S%z', start),
             request,
-            res._status,
+            res.status or 0,
             sent,
-            req:get_headers().referrer or '-',
-            req:get_headers().user_agent or '-'
+            req:get_headers():get_one("referer") or '-',
+            req:get_headers():get_one("user-agent") or '-'
     ))
 end)
 
