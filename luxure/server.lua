@@ -1,5 +1,6 @@
 local Router = require "luxure.router"
 local lunch = require "luncheon"
+local utils = require "luxure.utils"
 local Request = lunch.Request
 local Response = lunch.Response
 local methods = require "luxure.methods"
@@ -16,10 +17,11 @@ local log = require "log"
 ---
 ---@field private sock table socket being used by the server
 ---@field public router Router The router for incoming requests
----@field private middleware table List of middleware callbacks
+---@field private middleware fun(req: Request, res: Response) Chain of middleware callbacks
 ---@field public ip string defaults to '0.0.0.0'
 ---@field private env string defaults to 'production'
 ---@field private backlog number|nil defaults to nil
+---@field private kept_alive socket.tcp[]
 local Server = {}
 
 Server.__index = Server
@@ -92,7 +94,7 @@ function Server.new_with(sock, opts)
     env = opts.env or "production",
     ---@type number
     backlog = opts.backlog,
-    _sync = opts.sync,
+    kept_alive = {}
   }
   return setmetatable(base, Server)
 end
@@ -126,7 +128,6 @@ end
 function Server:use(middleware)
   log.trace("Server:use")
   if self.middleware == nil then
-    ---@type fun(req:Request,res:Response)
     self.middleware = function(req, res)
       self.router.route(self.router, req, res)
     end
@@ -162,17 +163,18 @@ local function debug_error_body(err)
   local code = err.status or "500"
   local h2 = err.msg_with_line or "Unknown Error"
   local pre = err.traceback or ""
-  return string.format([[<!DOCTYPE html>
-<html>
-    <head>
-    </head>
-    <body>
-        <h1>Error processing request: <code> %s </code></h1>
-        <h2>%s</h2>
-        <pre>%s</pre>
-    </body>
-</html>
-    ]], code, h2, pre)
+  return string.format(table.concat({
+    '<!DOCTYPE html>',
+    '<html>',
+    '  <head>',
+    '  </head>',
+    '  <body>',
+    '    <h1>Error processing request: <code> %s </code></h1>',
+    '    <h2>%s</h2>',
+    '    <pre>%s</pre>',
+    '  </body>',
+    '</html>',
+  }, '\n'), code, h2, pre)
 end
 
 local function error_request(env, err, res)
@@ -187,7 +189,50 @@ local function error_request(env, err, res)
     return
   end
   res:set_content_type("text/html"):send(debug_error_body(err))
-  return
+end
+
+function Server:get_keep_alive_details(headers)
+  local ret = {
+    cached = os.time()
+  }
+  local keeps = headers:get_all("keep-alive")
+  for _, v in (keeps or {}) do
+    local timeout = v:match("timeout%s*=%s*(%d+)")
+    if timeout then
+      ret.timeout = tonumber(timeout, 10)
+    end
+    local max = v:match("max%s*=%s*(%d+)")
+    if max then
+      ret.max = max
+    end
+  end
+  return ret
+end
+
+function Server:get_keep_alive(req)
+  log.trace("get_keep_alive")
+  local headers = req:get_headers()
+  if not headers then
+    return
+  end
+  local conns = headers:get_all("connection")
+  for _, v in ipairs(conns or {}) do
+    if string.find(v:lower(), "keep-alive") then
+      return self:get_keep_alive_details(headers)
+    end
+  end
+end
+
+function Server:maybe_keep_alive(incoming, req, res)
+  log.trace("maybe_keep_alive")
+  if req.err then
+    return
+  end
+  local keep_alive_details = self:get_keep_alive(req)
+  if keep_alive_details then
+    self.kept_alive[incoming] = keep_alive_details
+  end
+  res.hold_open = not not self.kept_alive[incoming]
 end
 
 function Server:_tick(incoming)
@@ -199,6 +244,7 @@ function Server:_tick(incoming)
   end
   local res = Response.new(200, incoming)
   self:route(req, res)
+  self:maybe_keep_alive(incoming, req, res)
   local has_sent = res:has_sent()
   if req.err then
     error_request(self.env, req.err, res)
@@ -209,6 +255,44 @@ function Server:_tick(incoming)
   return 1
 end
 
+function Server:_next_incoming(err_callback)
+  log.trace("_next_incoming", #self.kept_alive)
+  local ret
+  repeat
+    local rdrs = { self.sock }
+    for s, dets in pairs(self.kept_alive) do
+      log.debug("kept:", utils.table_string(dets))
+      if dets.timeout and os.difftime(os.time(), dets.cached) > dets.timeout then
+        self.kept_alive[s] = nil
+      else
+        table.insert(rdrs, s)
+      end
+    end
+    log.trace("selecting")
+    local rdrs, _, err = cosock.socket.select(rdrs)
+    log.trace("selected", #(rdrs or {}), err or "nil")
+    for _, rdr in ipairs(rdrs) do
+      -- check if it is the server socket
+      if rdr == self.sock then
+        local s, e = self.sock:accept()
+        if e and e ~= "timeout" then
+          return nil, e
+        end
+        if s then
+          ret = s
+          break
+        end
+      end
+      -- not the server socket
+      ret = rdr
+      -- remove from consideration until request/response is complete
+      self.kept_alive[rdr] = nil
+      break
+    end
+  until ret
+  return ret
+end
+
 ---A single step in the Server run loop
 ---which will call `accept` on the underlying socket
 ---and when that returns a client socket, it will
@@ -216,28 +300,19 @@ end
 ---the registered middleware and routes
 function Server:tick(err_callback)
   log.trace("Server:tick")
-  local incoming, err = self.sock:accept()
+  local incoming, err = self:_next_incoming(err_callback)
   if not incoming then
     err_callback(err)
     return
   end
-  if not self._sync then
-    cosock.spawn(function()
-      local nopanic, success, err = pcall(self._tick, self, incoming)
-      if not nopanic then
-        err_callback(success)
-        return
-      end
-      if not success then err_callback(err) end
-    end, string.format("Accepted request (ptr: %s)", incoming))
-  else
+  cosock.spawn(function()
     local nopanic, success, err = pcall(self._tick, self, incoming)
     if not nopanic then
       err_callback(success)
       return
     end
     if not success then err_callback(err) end
-  end
+  end, string.format("Accepted request (ptr: %s)", incoming))
 end
 
 function Server:_run(err_callback, should_continue)
@@ -246,18 +321,20 @@ function Server:_run(err_callback, should_continue)
   while should_continue() do self:tick(err_callback) end
 end
 
+function Server:spawn(err_callback, should_continue)
+  self.sock:settimeout(0)
+  err_callback = err_callback or function() end
+  should_continue = should_continue or function() return true end
+  cosock.spawn(function() self:_run(err_callback, should_continue) end,
+    "luxure-main-loop")
+end
+
 ---Start this server, blocking forever
 ---@param err_callback fun(msg:string):boolean Optional callback to be run if `tick` returns an error
 function Server:run(err_callback, should_continue)
   log.trace("Server:run")
-  err_callback = err_callback or function() return true end
-  if not self._sync then
-    cosock.spawn(function() self:_run(err_callback, should_continue) end,
-                 "luxure-main-loop")
-    cosock.run()
-  else
-    self:_run(err_callback, should_continue)
-  end
+  self:spawn(err_callback, should_continue)
+  cosock.run()
 end
 
 for _, method in ipairs(methods) do
@@ -269,4 +346,4 @@ for _, method in ipairs(methods) do
   end
 end
 
-return {Server = Server, Opts = Opts}
+return { Server = Server, Opts = Opts }

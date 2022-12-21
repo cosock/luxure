@@ -54,7 +54,10 @@ end
 ---Raise and error with a message and status
 ---@param msg string
 ---@param status number
-function Error.raise(msg, status) error(build_error_string(msg, status)) end
+function Error.raise(msg, status)
+  error(build_error_string(msg, status))  
+end
+
 local function parse_error_msg(s)
   local i = 1
   local keys = {"msg", "traceback", "orig_loc", "status"}
@@ -79,6 +82,7 @@ end
 
 ---Wrapper around `pcall` that will reconstruct the Error object
 ---on failure
+---@return boolean
 ---@return Error | string
 function Error.pcall(...)
   local res = table.pack(pcall(...))
@@ -90,7 +94,7 @@ function Error.pcall(...)
                                          "^(.+luxure/error.lua:[0-9]+): ", "")
     local status = math.tointeger(parsed.status) or 500
     return false, new_error(stripped_message, string.format("%s %s",
-                                                            parsed.orig_loc,
+                                                            parsed.orig_loc or "",
                                                             stripped_message),
                             status, parsed.traceback)
   end
