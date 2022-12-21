@@ -1,5 +1,6 @@
 local Router = require "luxure.router"
 local lunch = require "luncheon"
+local utils = require "luxure.utils"
 local Request = lunch.Request
 local Response = lunch.Response
 local methods = require "luxure.methods"
@@ -20,6 +21,7 @@ local log = require "log"
 ---@field public ip string defaults to '0.0.0.0'
 ---@field private env string defaults to 'production'
 ---@field private backlog number|nil defaults to nil
+---@field private kept_alive socket.tcp[]
 local Server = {}
 
 Server.__index = Server
@@ -92,6 +94,7 @@ function Server.new_with(sock, opts)
     env = opts.env or "production",
     ---@type number
     backlog = opts.backlog,
+    kept_alive = {}
   }
   return setmetatable(base, Server)
 end
@@ -186,7 +189,50 @@ local function error_request(env, err, res)
     return
   end
   res:set_content_type("text/html"):send(debug_error_body(err))
-  return
+end
+
+function Server:get_keep_alive_details(headers)
+  local ret = {
+    cached = os.time()
+  }
+  local keeps = headers:get_all("keep-alive")
+  for _, v in (keeps or {}) do
+    local timeout = v:match("timeout%s*=%s*(%d+)")
+    if timeout then
+      ret.timeout = tonumber(timeout, 10)
+    end
+    local max = v:match("max%s*=%s*(%d+)")
+    if max then
+      ret.max = max
+    end
+  end
+  return ret
+end
+
+function Server:get_keep_alive(req)
+  log.trace("get_keep_alive")
+  local headers = req:get_headers()
+  if not headers then
+    return
+  end
+  local conns = headers:get_all("connection")
+  for _, v in ipairs(conns or {}) do
+    if string.find(v:lower(), "keep-alive") then
+      return self:get_keep_alive_details(headers)
+    end
+  end
+end
+
+function Server:maybe_keep_alive(incoming, req, res)
+  log.trace("maybe_keep_alive")
+  if req.err then
+    return
+  end
+  local keep_alive_details = self:get_keep_alive(req)
+  if keep_alive_details then
+    self.kept_alive[incoming] = keep_alive_details
+  end
+  res.hold_open = not not self.kept_alive[incoming]
 end
 
 function Server:_tick(incoming)
@@ -198,6 +244,7 @@ function Server:_tick(incoming)
   end
   local res = Response.new(200, incoming)
   self:route(req, res)
+  self:maybe_keep_alive(incoming, req, res)
   local has_sent = res:has_sent()
   if req.err then
     error_request(self.env, req.err, res)
@@ -208,6 +255,44 @@ function Server:_tick(incoming)
   return 1
 end
 
+function Server:_next_incoming(err_callback)
+  log.trace("_next_incoming", #self.kept_alive)
+  local ret
+  repeat
+    local rdrs = { self.sock }
+    for s, dets in pairs(self.kept_alive) do
+      log.debug("kept:", utils.table_string(dets))
+      if dets.timeout and os.difftime(os.time(), dets.cached) > dets.timeout then
+        self.kept_alive[s] = nil
+      else
+        table.insert(rdrs, s)
+      end
+    end
+    log.trace("selecting")
+    local rdrs, _, err = cosock.socket.select(rdrs)
+    log.trace("selected", #(rdrs or {}), err or "nil")
+    for _, rdr in ipairs(rdrs) do
+      -- check if it is the server socket
+      if rdr == self.sock then
+        local s, e = self.sock:accept()
+        if e and e ~= "timeout" then
+          return nil, e
+        end
+        if s then
+          ret = s
+          break
+        end
+      end
+      -- not the server socket
+      ret = rdr
+      -- remove from consideration until request/response is complete
+      self.kept_alive[rdr] = nil
+      break
+    end
+  until ret
+  return ret
+end
+
 ---A single step in the Server run loop
 ---which will call `accept` on the underlying socket
 ---and when that returns a client socket, it will
@@ -215,7 +300,7 @@ end
 ---the registered middleware and routes
 function Server:tick(err_callback)
   log.trace("Server:tick")
-  local incoming, err = self.sock:accept()
+  local incoming, err = self:_next_incoming(err_callback)
   if not incoming then
     err_callback(err)
     return
@@ -237,6 +322,7 @@ function Server:_run(err_callback, should_continue)
 end
 
 function Server:spawn(err_callback, should_continue)
+  self.sock:settimeout(0)
   err_callback = err_callback or function() end
   should_continue = should_continue or function() return true end
   cosock.spawn(function() self:_run(err_callback, should_continue) end,
