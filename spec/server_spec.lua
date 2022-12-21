@@ -26,43 +26,45 @@ describe('Server', function()
     end
     -- assert(s, "Error from call_rx: " .. tostring(err))
   end))
-  it('should call middleware and handle requests', test_utils.wrap(function()
-    local s = assert(Server.new_with(mocks.MockTcp.new({
+  it('should call middleware and handle requests #middleware', test_utils.wrap(function()
+    local sock = mocks.MockTcp.new({
       { 'GET / HTTP/1.1' }
-    }), { sync = true }))
+    })
+    local s = assert(Server.new_with(sock, {}))
     s:listen(8080)
     local called = false
     local called_middleware = false
     s:use(function(req, res, next)
-      called_middleware = true
+      res:append_body("middleware")
       next(req, res)
     end)
     s:get('/', function(req, res)
-      called = true
+      res:send("sent")
     end)
     s:tick()
-    assert(called)
-    assert(called_middleware)
+    local mid = sock.accepted[1].out_rx:receive()
+    assert(mid:find("middlewaresent$"), string.format("no middleware: %q", mid))
   end))
   it('should call a middleware chain and handle requests', test_utils.wrap(function()
-    local s = assert(Server.new_with(mocks.MockTcp.new({
+    local sock = mocks.MockTcp.new({
       { 'GET / HTTP/1.1' }
-    }), { sync = true }))
+    })
+    local s = assert(Server.new_with(sock, {}))
     s:listen(8080)
     local called = false
     local middleware_call_count = 0
     for i = 1, 10, 1 do
       s:use(function(req, res, next)
-        middleware_call_count = middleware_call_count + 1
+        res:append_body(string.format("%i", i))
         next(req, res)
       end)
     end
     s:get('/', function(req, res)
-      called = true
+      res:send("sent")
     end)
     s:tick()
-    assert(called)
-    assert(middleware_call_count == 10)
+    local ret = sock.accepted[1].out_rx:receive()
+    assert(ret:find("10987654321sent"), string.format("expected 10 middles and a sent: %q", ret))
   end))
   it('middleware error should return 500 #filter', test_utils.wrap(function()
     local sock = mocks.MockTcp.new({ { 'GET / HTTP/1.1' } })
@@ -82,7 +84,6 @@ describe('Server', function()
       '^HTTP/1.1 500 Internal Server Error'),
       string.format('Expected 500 found %s', utils.table_string(sock.accepted[1]))
     )
-    print(sock.accepted[1].out_rx:receive())
   end))
   it('no endpoint found should return 404 #four', test_utils.wrap(function()
     local sock = mocks.MockTcp.new({ { 'GET / HTTP/1.1' } })
@@ -117,6 +118,30 @@ describe('Server', function()
     assert(string.find(ret, '<!DOCTYPE html>', 1, true),
     string.format("Expected response to start with 500 error found: %q", ret)
   )
+  end))
+  it('keep-alive reuses socket #ka', test_utils.wrap(function()
+    local sock = mocks.MockTcp.new({{
+      'GET /keep-alive HTTP/1.1',
+      'Content-Length: 0',
+      'Connection: keep-alive',
+      '',
+    }})
+    local s = assert(Server.new_with(sock, Opts.new():set_env("debug")))
+    s:get('/keep-alive', function(req, res)
+      res:send("sent")
+    end)
+    s:tick()
+    local rx = sock.accepted[1].out_rx
+    local tx = sock.accepted[1].in_tx
+    local res1 = assert(rx:receive())
+    assert(res1:find("HTTP/1.1 200 OK\r\n"), string.format("Invalid response: %q", res1))
+    tx:send('GET /keep-alive HTTP/1.1')
+    tx:send('Content-Length: 0')
+    tx:send('Connection: keep-alive')
+    tx:send('')
+    local res2 = assert(rx:receive())
+    assert.are.equal(1, #sock.accepted)
+    assert(res2:find("HTTP/1.1 200 OK\r\n"), string.format("Invalid response: %q", res1))
   end))
 end)
 

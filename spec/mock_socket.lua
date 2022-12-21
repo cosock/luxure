@@ -76,6 +76,11 @@ function MockSocket:send(s)
   end
 end
 
+function MockSocket:setwaker(...)
+  self.inner:setwaker(...)
+  
+end
+
 ---TCP Master Socket
 local MockTcp = {}
 MockTcp.__index = MockTcp
@@ -112,6 +117,12 @@ function MockTcp:getsockname()
   return '0.0.0.0', 0
 end
 
+function MockTcp:settimeout(tm)
+  self.inner:settimeout(tm)
+end
+function MockTcp:setwaker(...)
+  self.inner:setwaker(...)
+end
 local MockModule = {}
 MockModule.__index = MockModule
 local sock_tx, sock_rx = cosock.channel.new()
@@ -128,6 +139,7 @@ end
 function MockModule.bind(ip, port)
   return 1
 end
+
 
 return {
   MockSocket = MockSocket,

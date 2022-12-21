@@ -80,7 +80,10 @@ describe('Integration Test', function()
       end
         end, 'client loop')
     
-    server:spawn(error, function()
+    server:spawn(function(dets)
+      print("ERROR: dets", dets)
+      error()
+    end, function()
       return ct < total_tests
     end)
   end))
