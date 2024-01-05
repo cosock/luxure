@@ -2,8 +2,7 @@
 local mime = require 'mime'
 local lux = require 'luxure'
 
-local server = lux.Server.new(lux.Opts.new():env('debug'))
-server:listen(9090)
+local server = lux.Server.new(lux.Opts.new():set_env('debug'))
 -- use some middleware that will check for
 -- the authorization header with a password 'SUPERSECRET'
 server:use(function (req, res, next)
@@ -11,35 +10,41 @@ server:use(function (req, res, next)
         return next(req, res)
     end
     local h = req:get_headers();
-    if h.authorization then
-        for encoded in string.gmatch(h.authorization, 'Basic (.*)') do
+    local auth = h:get_one("authorization")
+    if auth then
+        for encoded in string.gmatch(auth, 'Basic (.*)') do
             local decoded = mime.decode('base64')(encoded)
             for _ in string.gmatch(decoded, '.*:SUPERSECRET$') do
                 return next(req, res)
             end
         end
     end
-    res.headers.www_authenticate = 'Basic realm=\'my realm\''
+    res.headers:append("www_authenticate", "Basic realm='my realm'")
     lux.Error.raise('Unable to authenticate', 401)
 end)
 
 local function static_content(path, res)
     local f = io.open(path)
     lux.Error.assert(f, 'File not found', 404)
-    res.content_type('text/html')
+    res:set_content_type('text/html')
     for line in f:lines('L') do
-        res.append_body(line)
+        res:append_body(line)
     end
     res:send()
     if f then f:close() end
 end
 
 server:get('/', function(req, res)
-    static_content('static/not_authed.html')
+    static_content('static/not_authed.html', res)
 end)
 
 server:get('/authed', function(req, res)
-    static_content('static/authed.html')
+    static_content('static/authed.html', res)
 end)
 
+server.sock:setoption('reuseaddr', true)
+-- open the server's socket on port 8080
+server:listen(0)
+server.sock:setoption('reuseaddr', true)
+print(string.format('listening on http://%s:%s', server.sock:getsockname()))
 server:run()

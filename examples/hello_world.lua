@@ -83,14 +83,14 @@ end)
 -- define a GET endpoint, expecting query params
 server:get('/hello', function(req, res)
     if req.url.query.name == nil then
-        res:status(404):send()
+        res:set_status(404):send()
         return
     end
     res:send(string.format('Hello %s!', req.url.query.name))
 end)
 
 server:get('/dynamic', function(req, res)
-    res:content_type('text/html'):send([[<!DOCTYPE html>
+    res:set_content_type('text/html'):send([[<!DOCTYPE html>
 <html>
 <head>
 </head>
@@ -164,7 +164,7 @@ end)
 
 server.sock:setoption('reuseaddr', true)
 -- open the server's socket on port 8080
-server:listen(8080)
+server:listen(0)
 server.sock:setoption('reuseaddr', true)
 print(string.format('listening on http://%s:%s', server.sock:getsockname()))
 -- Run the server forever, this will block the application
